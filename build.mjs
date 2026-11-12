@@ -24,6 +24,7 @@ sandbox.globalThis = sandbox;
 vm.runInNewContext(fs.readFileSync(path.join(SRC, 'sites.js'), 'utf8'), sandbox);
 const SITES = sandbox.BEATSHIVER_SITES;
 const EMBEDS = SITES.embedMatches();
+const SOURCE_PAGES = SITES.pageMatches();   // measure-on-source sites: their own top frames
 
 const COMMON_FILES = ['shim.js', 'sites.js', 'embed_main.js', 'embed_relay.js', 'page_relay.js',
                       'background.js', 'debug.html', 'debug.js', 'debug.css'];
@@ -35,8 +36,8 @@ function baseManifest() {
     name: 'Beatshiver',
     short_name: 'Beatshiver',
     version: pkg.version,
-    description: 'Reads the playback clock of video embeds on beatshiver.com, and lets the page '
-      + 'measure a track in one click.',
+    description: 'Reads the playback clock of video embeds on beatshiver.com, and measures a '
+      + 'track on its source site (YouTube) for beatshiver.com, where the script then plays.',
     icons: { 16: 'icons/16.png', 32: 'icons/32.png', 48: 'icons/48.png', 128: 'icons/128.png' },
     action: { default_title: 'Beatshiver', default_icon: { 16: 'icons/16.png', 32: 'icons/32.png' } },
     permissions: ['storage'],
@@ -48,6 +49,14 @@ function baseManifest() {
         all_frames: true },
       { matches: SITES.PAGE_MATCHES, js: ['shim.js', 'page_relay.js'], run_at: 'document_start',
         all_frames: false },
+      // Measure-on-source pages: the same two scripts, top frame only. Their own entries, so an
+      // embed frame inside such a page is not matched by them.
+      ...(SOURCE_PAGES.length ? [
+        { matches: SOURCE_PAGES, js: ['sites.js', 'embed_main.js'], run_at: 'document_start',
+          all_frames: false, world: 'MAIN' },
+        { matches: SOURCE_PAGES, js: ['shim.js', 'embed_relay.js'], run_at: 'document_start',
+          all_frames: false },
+      ] : []),
     ],
   };
 }
@@ -68,7 +77,9 @@ const TARGETS = {
         id: 'extension@beatshiver.com',
         strict_min_version: '128.0',
         // Nothing leaves the browser through the extension itself: it relays embed state to the
-        // beatshiver.com tab the user has open, and audio to that same tab.
+        // beatshiver.com tab the user has open, and audio to that same tab; on a measure-on-source
+        // site (YouTube) it relays that tab's player state to the beatshiver.com tab that opened
+        // it. What the page then sends to beatshiver.com is the site's, under its own opt-in.
         data_collection_permissions: { required: ['none'] },
       },
     };
@@ -121,7 +132,8 @@ function build(name) {
   for (const f of files) fs.copyFileSync(path.join(SRC, f), path.join(out, f));
   for (const s of [16, 32, 48, 128]) fs.writeFileSync(path.join(out, 'icons', s + '.png'), iconPng(s));
   fs.writeFileSync(path.join(out, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
-  console.log(`built dist/${name} (${files.length} files, ${EMBEDS.length} embed patterns)`);
+  console.log(`built dist/${name} (${files.length} files, ${EMBEDS.length} embed patterns, `
+              + `${SOURCE_PAGES.length} source page patterns)`);
 }
 
 const want = process.argv.slice(2);

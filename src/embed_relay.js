@@ -1,9 +1,13 @@
-// ISOLATED world, document_start, every embed frame. Carries embed_main.js's clock reports out
-// of the frame to the background, which forwards them to the beatshiver.com top frame of the
-// same tab. Never talks to the embed page itself.
+// ISOLATED world, document_start, every embed frame -- and the top frame of a measure-on-source
+// site's pages. Carries embed_main.js's clock reports out of the frame to the background, which
+// forwards them to the beatshiver.com top frame of the same tab (embeds), or to the beatshiver
+// tab that opened this source tab. Never talks to the page it runs in.
+//
+// No top-frame guard here: embed_main.js is the gate. In a top frame it reports only on a
+// measure-on-source site, so an embed URL opened directly dispatches nothing to carry.
 (function () {
   'use strict';
-  if (window === window.top) return;
+  const TOP = window === window.top;
 
   // Where the browser tells us (Chrome, Safari), skip frames whose top is not a page we report
   // to: no point waking the background for an xvideos embed on some other site. Firefox has no
@@ -25,13 +29,22 @@
   }
 
   let dead = false;
+  // A source page nobody asked to measure (the user's own YouTube browsing): the background
+  // answers `{want: false}` and this goes quiet, so a playing video does not wake the service
+  // worker four times a second. `source-wake` from the background un-quiets it.
+  let quiet = false;
+  if (TOP) {
+    ext.runtime.onMessage.addListener(msg => {
+      if (msg && msg.type === 'source-wake') quiet = false;
+    });
+  }
   document.addEventListener('beatshiver:clock', ev => {
-    if (dead || typeof ev.detail !== 'string') return;
+    if (dead || quiet || typeof ev.detail !== 'string') return;
     let data;
     try { data = JSON.parse(ev.detail); } catch (e) { return; }
     try {
       const p = ext.runtime.sendMessage({ type: 'clock', data });
-      if (p && p.catch) p.catch(onErr);
+      if (p && p.then) p.then(res => { if (TOP && res && res.want === false) quiet = true; }, onErr);
     } catch (e) { onErr(e); }
   });
 
