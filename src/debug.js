@@ -131,8 +131,11 @@ window.__bsToggleTone = toggleTone;
 window.__bsStartCapture = startCapture;
 window.__bsStopCapture = stopCapture;
 
-ext.runtime.onMessage.addListener(msg => {
-  if (!msg || (msg.tabId != null && msg.tabId !== myTabId)) return;
+ext.runtime.onMessage.addListener((msg, sender) => {
+  // Content scripts' runtime.sendMessage reaches extension pages too: an embed's raw `clock`
+  // arrives here as well as the background's relayed copy. Only take what is addressed to this
+  // tab, from an extension context (no sender.tab).
+  if (!msg || sender.tab || msg.tabId !== myTabId) return;
   if (msg.type === 'clock') onClock(msg);
   else if (msg.type === 'capture') onCapture(msg);
   else if (msg.type === 'pcm' && capId && msg.id === capId) onPcm(msg);

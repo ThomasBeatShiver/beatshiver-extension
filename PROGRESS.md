@@ -6,3 +6,4 @@
 2026-11-12 10:07 DONE first cut of src/ (clock hooks, relays, background, offscreen PCM capture, debug page) + build.mjs generating dist/chrome and dist/firefox; untested
 2026-11-12 10:11 DONE fixture tests 9/9 headless: clock from cross-origin fixture frames at real embed URLs (closed shadow root, VAST-style pre-roll flagged, detached Audio()), events in order, relay latency p95 2-3 ms, no leak to non-beatshiver pages
 2026-11-12 10:12 DONE real embeds headless: clocks arrive from real xvideos, pornhub, framatube cross-origin frames (t advancing ~8-10 s over 10 s); no Pornhub pre-roll was served, so real VAST handling is unverified
+2026-11-12 10:13 DONE debug page headless: live clocks from xvideos, pornhub, framatube frames inside the extension page (fixed: raw embed broadcasts were reaching the page unaddressed)
