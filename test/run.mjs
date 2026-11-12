@@ -76,14 +76,18 @@ async function launch(extraArgs = [], { unmute = false } = {}) {
     ignoreDefaultArgs: unmute ? ['--mute-audio'] : [],
   });
   // Fixtures: our page at beatshiver.com, our stand-in players at real embed URLs.
-  await ctx.route('https://beatshiver.com/__bsx/**', route => {
+  const pageRoute = route => {
     const u = new URL(route.request().url());
     if (u.pathname === '/__bsx/client.js') {
       return route.fulfill({ contentType: 'text/javascript',
         body: fs.readFileSync(path.join(ROOT, 'client', 'beatshiver-extension-client.js')) });
     }
     return route.fulfill({ contentType: 'text/html', body: fs.readFileSync(path.join(FIX, 'page.html')) });
-  });
+  };
+  // qa too: every page origin in sites.js must actually receive clocks, not just match the
+  // manifest (a hardcoded beatshiver.com in embed_relay.js once dropped every qa clock).
+  await ctx.route('https://beatshiver.com/__bsx/**', pageRoute);
+  await ctx.route('https://qa.beatshiver.com/__bsx/**', pageRoute);
   const fixtureEmbed = route => {
     const u = new URL(route.request().url());
     if (u.pathname.startsWith('/__bsx/tone.wav')) {
@@ -206,6 +210,18 @@ async function fixtures(L) {
   const leaked = await other.evaluate(() => window.__got.length);
   record(G, 'no clock reaches a non-beatshiver top page', leaked === 0, `messages=${leaked}`);
   await other.close();
+
+  // ...and one does reach qa.beatshiver.com, the channel the site's half ships on first.
+  const qa = await L.ctx.newPage();
+  await qa.goto('https://qa.beatshiver.com/__bsx/test.html?embeds='
+    + encodeURIComponent('https://www.xvideos.com/embedframe/BSXFIXTURE?kind=xvideos'));
+  let qaGot = 0;
+  for (let i = 0; i < 20 && !qaGot; i++) {
+    await sleep(250);
+    qaGot = await qa.evaluate(() => (window.__t && window.__t.clocks || []).length);
+  }
+  record(G, 'clocks reach a qa.beatshiver.com top page', qaGot > 0, `messages=${qaGot}`);
+  await qa.close();
 }
 
 // Start playback in each real embed: a real click on the player (Pornhub's player only starts

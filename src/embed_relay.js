@@ -12,7 +12,15 @@
   const ao = location.ancestorOrigins;
   if (ao && ao.length) {
     const top = ao[ao.length - 1];
-    const sites = ['https://beatshiver.com', extOrigin];
+    // The page origins are the page_relay entry's matches, which build.mjs writes from sites.js's
+    // PAGE_MATCHES. A hardcoded beatshiver.com here silently dropped every clock on
+    // qa.beatshiver.com (2026-11-12). Not by loading sites.js into this world: it already runs in
+    // this frame's MAIN world, and Chrome then injected nothing from this entry (0 clocks, 6/11).
+    const sites = [extOrigin];
+    for (const cs of ext.runtime.getManifest().content_scripts || []) {
+      if (!(cs.js || []).includes('page_relay.js')) continue;
+      for (const m of cs.matches) sites.push(m.replace(/\/\*$/, ''));
+    }
     if (!sites.includes(top)) return;
   }
 
