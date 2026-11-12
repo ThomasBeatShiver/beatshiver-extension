@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Beatshiver extension debug</title>
+<link rel="stylesheet" href="debug.css">
+</head>
+<body>
+<header>
+  <h1>Beatshiver extension debug</h1>
+  <p id="caps">checking capabilities…</p>
+</header>
+
+<section>
+  <h2>Embed clocks</h2>
+  <p class="hint">Each frame below is an ordinary public embed. The extension's embed scripts
+  report its media clock here exactly as they would to beatshiver.com. Press play inside a frame.</p>
+  <form id="addForm">
+    <input id="addUrl" type="url" placeholder="any embed URL (xvideos embedframe, pornhub embed, PeerTube /videos/embed/…)" size="70">
+    <button type="submit">Add frame</button>
+  </form>
+  <div id="frames"></div>
+  <table id="clocks">
+    <thead><tr><th>frame</th><th>site</th><th>event</th><th>time</th><th>extrapolated</th><th>paused</th><th>rate</th><th>duration</th><th>ad</th><th>msgs</th><th>age</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<section>
+  <h2>Capture (one-click measuring)</h2>
+  <p class="hint">Captures this tab's audio through <code>chrome.tabCapture</code> in an offscreen
+  document, keeps it audible, and streams PCM back here. Chrome only grants it after you click the
+  Beatshiver toolbar icon on this tab; if the state says <b>pending-gesture</b>, click the icon.
+  Firefox and Safari answer <b>unsupported</b> (the site falls back to getDisplayMedia).</p>
+  <div class="row">
+    <button id="tone">Test tone on</button>
+    <button id="capStart">Start capture</button>
+    <button id="capStop">Stop capture</button>
+    <span id="capState">idle</span>
+  </div>
+  <div class="meter"><div id="level"></div><div id="peak"></div></div>
+  <p id="capStats" class="mono">no audio yet</p>
+</section>
+<script src="shim.js"></script>
+<script src="debug.js"></script>
+</body>
+</html>
