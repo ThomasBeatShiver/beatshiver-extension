@@ -1,0 +1,15 @@
+{
+  "name": "beatshiver-extension",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Beatshiver browser extension: embed clock + one-click tab capture",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node build.mjs && node test/run.mjs",
+    "lint:firefox": "node build.mjs && web-ext lint --source-dir dist/firefox"
+  },
+  "devDependencies": {
+    "playwright": "^1.65.0",
+    "web-ext": "^8.10.0"
+  }
+}
