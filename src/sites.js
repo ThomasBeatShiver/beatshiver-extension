@@ -50,6 +50,8 @@
       embeds: ['https://www.pornhub.com/embed/*'],
       content: 'video.mgp_videoElement',
       contentSrc: '^(blob:|https://[^/]*(phncdn\\.com|pornhub\\.com)/)',
+      // Guessed, not observed: no Pornhub pre-roll was served to any test run (2026-11-12). The
+      // shape rules in embed_main.js are what actually catch an unmarked pre-roll.
       adPlayer: '.mgp_adRollActive, .mgp_adPlaying, .mgp_preRoll, .mgp_isAd',
     },
     {

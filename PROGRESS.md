@@ -13,3 +13,4 @@
 2026-11-12 10:19 DONE coordinator request: xvideos unmarked pre-roll (video-overlay) handled by short-beside-long + unknown-length rules; fixture test passes (never chosen, adPlaying from its play() before metadata, content plays from 0)
 2026-11-12 10:19 DONE full suite 22/22 headless (test/run.mjs now rebuilds dist/chrome itself)
 2026-11-12 10:20 DONE web-ext lint dist/firefox: 0 errors, 4 warnings (tabCapture/offscreen unsupported, all behind the HAS_CAPTURE guard); Firefox itself not installed here, so the Firefox build was never loaded
+2026-11-12 10:21 DONE README.md (layout, build/load per browser, Safari converter steps, tests) and INTEGRATION.md (message formats, detection, clock, capture states, gesture flow)
