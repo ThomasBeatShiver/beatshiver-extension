@@ -45,7 +45,7 @@ function onClock(msg) {
   let r = rows.get(key);
   if (!r) {
     const tr = document.createElement('tr');
-    tr.innerHTML = '<td></td>'.repeat(11);
+    for (let i = 0; i < 11; i++) tr.append(document.createElement('td'));
     $('clocks').tBodies[0].append(tr);
     r = { tr, last: null, count: 0 };
     rows.set(key, r);

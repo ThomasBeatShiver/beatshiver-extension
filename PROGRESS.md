@@ -12,3 +12,4 @@
 2026-11-12 10:19 DONE stream mode + replay in the same tab feeds back (one run 0.141 tone grew to 0.57 RMS; varies run to run) -> pcm is the default/audible mode, client never monitors a stream
 2026-11-12 10:19 DONE coordinator request: xvideos unmarked pre-roll (video-overlay) handled by short-beside-long + unknown-length rules; fixture test passes (never chosen, adPlaying from its play() before metadata, content plays from 0)
 2026-11-12 10:19 DONE full suite 22/22 headless (test/run.mjs now rebuilds dist/chrome itself)
+2026-11-12 10:20 DONE web-ext lint dist/firefox: 0 errors, 4 warnings (tabCapture/offscreen unsupported, all behind the HAS_CAPTURE guard); Firefox itself not installed here, so the Firefox build was never loaded
