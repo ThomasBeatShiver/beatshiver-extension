@@ -367,8 +367,11 @@ ext.runtime.onMessage.addListener((msg, sender) => {
           return { type: 'source', id: msg.id, state: 'closed', reason: 'not-open' };
         }
         await endSource(src, 'closed', 'requested', { notify: false });
-        // We opened that tab for this session; the page is done with it.
+        // We opened that tab for this session; the page is done with it. The page usually ends
+        // the take first (on the clock's own `ended`), before the 500 ms wait above, so it is
+        // this path that hands the listener back to beatshiver.com, not that one.
         ext.tabs.remove(src.targetTabId).catch(() => {});
+        focusTab(src.consumerTabId);
         return { type: 'source', id: src.id, state: 'closed', reason: 'requested' };
       });
     case 'capture-start': {
