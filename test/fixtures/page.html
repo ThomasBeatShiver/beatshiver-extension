@@ -1,0 +1,61 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>beatshiver.com test page (served by the test, not the site)</title></head>
+<body>
+<h1>extension test page</h1>
+<div id="frames"></div>
+<script type="module">
+import * as bsx from '/__bsx/client.js';
+const T = window.__t = { clocks: [], capture: [], pcm: { chunks: 0, sumSq: 0, n: 0, sampleRate: 0 },
+                         detect: null, attrAtStart: document.documentElement.getAttribute('data-beatshiver-extension') };
+window.__bsx = bsx;
+bsx.onClock(m => { T.clocks.push(m); });
+window.addEventListener('message', ev => {
+  if (ev.source === window && ev.data && ev.data.source === 'beatshiver-extension' && ev.data.type === 'capture') T.capture.push(ev.data);
+});
+const q = new URLSearchParams(location.search);
+for (const u of (q.get('embeds') || '').split(',').filter(Boolean)) {
+  const f = document.createElement('iframe');
+  f.src = u; f.width = 480; f.height = 270; f.allow = 'autoplay; fullscreen';
+  document.getElementById('frames').append(f);
+}
+T.detect = await bsx.detectExtension();
+let tone = null;
+window.__toneOn = (amp = 0.2, freq = 440) => {
+  tone = new AudioContext();
+  const o = tone.createOscillator(), g = tone.createGain();
+  o.frequency.value = freq; g.gain.value = amp; o.connect(g).connect(tone.destination); o.start();
+  return tone.state;
+};
+window.__toneOff = () => { if (tone) tone.close(); tone = null; };
+window.__capPcm = async () => {
+  const T2 = T.pcm;
+  const cap = await bsx.startCapture({ mode: 'pcm', onPcm: (f, m) => {
+    T2.chunks++; T2.sampleRate = m.sampleRate;
+    let s = 0; for (const x of f) s += x * x; T2.sumSq += s; T2.n += f.length;
+    T2.lastRms = Math.sqrt(s / f.length); T2.lastLatency = Date.now() - m.wallMs;
+  } });
+  window.__cap = cap;
+  return { sampleRate: cap.sampleRate, channels: cap.channels };
+};
+window.__capStream = async (monitor) => {
+  const cap = await bsx.startCapture({ mode: 'stream', monitor });
+  window.__cap = cap;
+  const ctx = new AudioContext();
+  const an = ctx.createAnalyser(); an.fftSize = 2048;
+  ctx.createMediaStreamSource(cap.stream).connect(an);
+  const buf = new Float32Array(an.fftSize);
+  const rms = [];
+  for (let i = 0; i < 20; i++) {
+    await new Promise(r => setTimeout(r, 100));
+    an.getFloatTimeDomainData(buf);
+    let s = 0; for (const x of buf) s += x * x; rms.push(Math.sqrt(s / buf.length));
+  }
+  ctx.close();
+  return { tracks: cap.stream.getAudioTracks().map(t => t.label + '/' + t.readyState), rms };
+};
+window.__capError = async (mode) => {
+  try { await bsx.startCapture({ mode }); return 'started'; }
+  catch (e) { window.__pendingErr = e; return e.name + ': ' + e.message; }
+};
+</script>
+</body></html>
