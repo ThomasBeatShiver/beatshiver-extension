@@ -70,13 +70,17 @@ function named(name, message, extra) {
 /**
  * Ask the extension to capture this tab.
  *
- * mode 'stream' (default): resolves with `{ stream, stop }`, a real MediaStream of the tab's
- *   audio. Tab capture mutes the tab for the user, so unless `monitor: false` this also plays the
- *   stream to the speakers through its own AudioContext.
- * mode 'pcm': resolves with `{ sampleRate, channels, stop }` and calls `onPcm(Float32Array,
- *   msg)` per chunk; the extension keeps the tab audible itself.
+ * mode 'pcm' (default): resolves with `{ sampleRate, channels, stop }` and calls
+ *   `onPcm(Float32Array, msg)` per chunk. The extension captures in its offscreen document and
+ *   plays the audio back out itself, so the user keeps hearing the tab. `monitor: false` turns
+ *   that playback off.
+ * mode 'stream': resolves with `{ stream, stop }`, a real MediaStream of the tab's audio, for a
+ *   page that wants to feed its existing MediaStream pipeline. Chrome stops playing a captured
+ *   tab to the user, and this page cannot put it back: replaying the stream inside the captured
+ *   tab is captured again and feeds back (measured: a 0.141 RMS tone grew to 0.57 in two
+ *   seconds). So the stream is silent for the user; use it only where that is acceptable.
  */
-export function startCapture({ mode = 'stream', monitor = true, onPcm = null, channels = 1,
+export function startCapture({ mode = 'pcm', monitor = true, onPcm = null, channels = 1,
                                chunkFrames = 2048, timeoutMs = 10000 } = {}) {
   const id = 'cap-' + Math.random().toString(36).slice(2);
   let offPcm = null;
@@ -96,10 +100,9 @@ export function startCapture({ mode = 'stream', monitor = true, onPcm = null, ch
         offPcm = listen(p => { if (p.type === 'pcm' && p.id === id && onPcm) onPcm(p.data, p); });
         resolve({ id, sampleRate: m.sampleRate, channels: m.channels, stop });
       } else {
-        openStream(m.streamId, monitor).then(({ stream, ctx }) => {
+        openStream(m.streamId).then(stream => {
           resolve({ id, stream, stop: () => {
             stream.getTracks().forEach(t => t.stop());
-            if (ctx) ctx.close();
             stop();
           } });
         }, e => reject(named('ExtensionCaptureError', e.name + ': ' + e.message)));
@@ -135,16 +138,10 @@ export function startCapture({ mode = 'stream', monitor = true, onPcm = null, ch
   });
 }
 
-async function openStream(streamId, monitor) {
+async function openStream(streamId) {
   // Must happen within a few seconds of the id being issued; Chrome expires unused ids.
-  const stream = await navigator.mediaDevices.getUserMedia({
+  return navigator.mediaDevices.getUserMedia({
     audio: { mandatory: { chromeMediaSource: 'tab', chromeMediaSourceId: streamId } },
     video: false,
   });
-  let ctx = null;
-  if (monitor) {
-    ctx = new AudioContext();
-    ctx.createMediaStreamSource(stream).connect(ctx.destination);
-  }
-  return { stream, ctx };
 }

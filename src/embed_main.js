@@ -140,7 +140,39 @@
   }
 
   /** 'content' | 'ad' | 'unknown' -- what this element is playing right now. */
+  function knownDur(el) {
+    return Number.isFinite(el.duration) && el.duration > 0 ? el.duration : null;
+  }
+
+  /** Longest known duration among the other connected media elements in this frame. */
+  function longestOther(el) {
+    let m = 0;
+    for (const o of tracked) {
+      if (o === el || !o.isConnected) continue;
+      const d = knownDur(o);
+      if (d && d > m) m = d;
+    }
+    return m;
+  }
+
+  // Ad-serving hosts in a src: a VAST player that plays the creative straight off the ad CDN.
+  const AD_SRC = /vast|vpaid|preroll|adserv|doubleclick|googlesyndication|trafficjunky|exoclick|exosrv|tsyndicate|adtng|adspyglass|\/ads?\//i;
+
   function role(el) {
+    // Shape rules first, because they need no markup at all. xvideos (seen 2026-11-12 on the
+    // Android build): the pre-roll is a second <video class="video-overlay">, ~20 s, no ad class
+    // or ad host, inside the same player as the paused 37-minute content element -- so the
+    // content selector matches it too.
+    //  * short-beside-long: a clip under 90 s beside one of 60 s+ and 3x its length is the ad;
+    //  * unknown-length: a clip whose duration is not known yet never outranks one with a known
+    //    long duration (the same pre-roll between play() and loadedmetadata). It is 'pending',
+    //    not 'ad', until its metadata says which it is.
+    const d = knownDur(el);
+    const other = longestOther(el);
+    if (d && d < 90 && other >= 60 && other > 3 * d) return 'ad';
+    if (!d && el.duration !== Infinity && other >= 60) return 'pending';
+    if (AD_SRC.test(el.currentSrc || el.src || '')) return 'ad';
+
     let contentMatch = false;
     if (site.content) {
       try { contentMatch = el.matches(site.content); } catch (e) {}
@@ -165,7 +197,7 @@
     let best = null, bestScore = -1;
     for (const el of tracked) {
       const r = role(el);
-      if (r === 'ad') continue;
+      if (r === 'ad' || r === 'pending') continue;
       // Content beats unknown; then something that has loaded; then the longest; a detached
       // element that never loaded anything scores nothing.
       const score = (r === 'content' ? 4e9 : 0) + (el.readyState > 0 ? 2e9 : 0) + finiteDur(el);
@@ -175,7 +207,12 @@
   }
 
   function adPlaying() {
-    for (const el of tracked) if (!el.paused && !el.ended && role(el) === 'ad') return true;
+    for (const el of tracked) {
+      if (el.paused || el.ended) continue;
+      const r = role(el);
+      // A playing clip of unknown length beside a long one: the pre-roll before its metadata.
+      if (r === 'ad' || r === 'pending') return true;
+    }
     return false;
   }
 

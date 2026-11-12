@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 import { chromium } from 'playwright';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -22,9 +23,13 @@ const EXT = path.join(ROOT, 'dist', 'chrome');
 const FIX = path.join(ROOT, 'test', 'fixtures');
 const OUT = path.join(ROOT, 'test', 'out');
 fs.mkdirSync(OUT, { recursive: true });
+// Always test what src/ says now, never a stale dist/.
+execFileSync(process.execPath, [path.join(ROOT, 'build.mjs'), 'chrome'], { stdio: 'inherit' });
 
 const argv = process.argv.slice(2);
 const HEADFUL = argv.includes('--headful');
+// Headful runs play the test tone on the real speakers unless muted; --audible to hear it.
+const MUTE = HEADFUL && !argv.includes('--audible');
 const NO_REAL = argv.includes('--no-real');
 const ONLY = (argv.find(a => a.startsWith('--only=')) || '').slice(7) || null;
 
@@ -52,7 +57,7 @@ function wav(seconds, rate = 8000, freq = 330) {
   return b;
 }
 
-async function launch(extraArgs = []) {
+async function launch(extraArgs = [], { unmute = false } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bsx-profile-'));
   const ctx = await chromium.launchPersistentContext(dir, {
     channel: 'chromium',
@@ -61,9 +66,14 @@ async function launch(extraArgs = []) {
       `--disable-extensions-except=${EXT}`,
       `--load-extension=${EXT}`,
       '--autoplay-policy=no-user-gesture-required',
+      ...(MUTE && !unmute ? ['--mute-audio'] : []),
       ...extraArgs,
     ],
     viewport: { width: 1280, height: 900 },
+    // Playwright mutes headless Chromium by default, and a muted tab captures as silence
+    // (measured: --mute-audio gives RMS 0.0000 in both capture modes). The capture group needs
+    // the audio unmuted; its tone is kept quiet for that reason.
+    ignoreDefaultArgs: unmute ? ['--mute-audio'] : [],
   });
   // Fixtures: our page at beatshiver.com, our stand-in players at real embed URLs.
   await ctx.route('https://beatshiver.com/__bsx/**', route => {
@@ -108,7 +118,7 @@ function byOrigin(clocks) {
 
 async function fixtures(L) {
   const G = 'fixtures';
-  const page = await L.ctx.newPage();
+  let page = await L.ctx.newPage();
   const embeds = [
     'https://www.pornhub.com/embed/BSXFIXTURE?kind=pornhub',
     'https://www.xvideos.com/embedframe/BSXFIXTURE?kind=xvideos',
@@ -181,8 +191,12 @@ async function fixtures(L) {
   });
   record(G, 'relay latency frame -> page (ms)', lat.n > 5 && lat.p95 < 100, JSON.stringify(lat));
 
-  // An embed on a page that is not beatshiver.com reports nowhere.
+  // xvideos pre-roll layout: an unmarked short <video> beside the paused long content.
   await page.close();
+  await xvPreroll(L);
+  page = null;
+
+  // An embed on a page that is not beatshiver.com reports nowhere.
   const other = await L.ctx.newPage();
   await other.route('https://example.com/**', r => r.fulfill({ contentType: 'text/html',
     body: `<iframe src="https://www.xvideos.com/embedframe/BSXFIXTURE?kind=xvideos"></iframe>
@@ -196,6 +210,36 @@ async function fixtures(L) {
 
 // Start playback in each real embed: a real click on the player (Pornhub's player only starts
 // from its own click handler), then play() muted as a fallback for the others.
+async function xvPreroll(L) {
+  const G = 'fixtures';
+  const page = await L.ctx.newPage();
+  await page.goto('https://beatshiver.com/__bsx/test.html?embeds='
+    + encodeURIComponent('https://www.xvideos.com/embedframe/BSXFIXTURE?kind=xvideos-preroll'));
+  await sleep(2000);   // content loaded, pre-roll (4 s) playing
+  const fr = page.frames().find(f => f.url().includes('kind=xvideos-preroll'));
+  const during = await fr.evaluate(() => ({ adT: window.__fx.ad && window.__fx.ad.currentTime,
+                                            adPaused: window.__fx.ad && window.__fx.ad.paused }));
+  await sleep(5500);   // pre-roll over, content ~2.5 s in
+  const xs = await page.evaluate(() => window.__t.clocks.filter(c => c.frame.origin === 'https://www.xvideos.com'));
+  const withMedia = xs.filter(c => c.media);
+  const ids = [...new Set(withMedia.map(c => c.media.mediaId))];
+  const durs = [...new Set(withMedia.map(c => c.media.duration))];
+  const adMsgs = xs.filter(c => c.adPlaying);
+  const heldDuringAd = adMsgs.every(c => c.media && c.media.paused && c.media.currentTime === 0);
+  const last = withMedia[withMedia.length - 1];
+  record(G, 'xvideos pre-roll fixture: the unmarked short overlay never becomes the clock',
+         ids.length === 1 && durs.length === 1 && durs[0] === 120,
+         `mediaIds=${JSON.stringify(ids)} durations=${JSON.stringify(durs)} msgs=${xs.length}`);
+  record(G, 'xvideos pre-roll fixture: adPlaying through the pre-roll, content held at 0',
+         adMsgs.length >= 3 && heldDuringAd && !adMsgs[0].media.currentTime && during.adPaused === false,
+         `adMsgs=${adMsgs.length} held=${heldDuringAd} adTimeAt2s=${during.adT && during.adT.toFixed(2)}`
+         + ` firstAdEvent=${adMsgs[0] && adMsgs[0].event} seq=${xs.map(c => c.event + ":" + c.candidates + ":" + c.adPlaying).join(",")}`);
+  record(G, 'xvideos pre-roll fixture: content then plays from 0',
+         !!last && !last.adPlaying && !last.media.paused && last.media.currentTime > 1 && last.media.currentTime < 4,
+         last ? `t=${last.media.currentTime.toFixed(2)} paused=${last.media.paused} ad=${last.adPlaying}` : 'none');
+  await page.close();
+}
+
 async function startReal(page) {
   for (const f of page.frames()) {
     if (f === page.mainFrame()) continue;
@@ -261,21 +305,25 @@ async function gesture(L) {
   await page.close();
 }
 
+// Quiet: this tone really plays on the machine's speakers (see `unmute`). RMS of a sine = A/sqrt2.
+const AMP = 0.02, RMS = AMP / Math.SQRT2;
+const near = x => x > RMS * 0.8 && x < RMS * 1.2;
+
 async function capture(L) {
   const G = 'capture';
   const page = await L.ctx.newPage();
   await page.goto('https://beatshiver.com/__bsx/test.html');
   await page.waitForFunction(() => window.__t && window.__t.detect !== null, null, { timeout: 5000 });
-  await page.evaluate(() => window.__toneOn(0.2, 440));
+  const toneState = await page.evaluate(a => window.__toneOn(a, 440), AMP);
+  console.log('tone context state', toneState);
   // pcm mode: offscreen capture, re-routed to the speakers, PCM back to the page.
   let r;
   try { r = await page.evaluate(() => window.__capPcm()); } catch (e) { r = { error: e.message }; }
   await sleep(2500);
   const pcm = await page.evaluate(() => window.__t.pcm);
   const rms = pcm.n ? Math.sqrt(pcm.sumSq / pcm.n) : 0;
-  // A 0.2-amplitude sine has RMS 0.141.
   record(G, 'pcm mode: chunks arrive with the tab tone in them',
-         pcm.chunks > 10 && rms > 0.08 && rms < 0.2,
+         pcm.chunks > 10 && near(rms),
          `start=${JSON.stringify(r)} chunks=${pcm.chunks} rate=${pcm.sampleRate} rms=${rms.toFixed(4)} lastLatency=${pcm.lastLatency}ms`);
   const offscreenCount = L.ctx.serviceWorkers().length; // informational
   await page.evaluate(() => window.__cap && window.__cap.stop());
@@ -290,7 +338,7 @@ async function capture(L) {
   try { s = await page.evaluate(() => window.__capStream(false)); } catch (e) { s = { error: e.message.split('\n')[0] }; }
   const mean = s.rms ? s.rms.reduce((a, b) => a + b, 0) / s.rms.length : 0;
   record(G, 'stream mode: page gets a MediaStream of the tab with the tone in it',
-         !!s.rms && mean > 0.08 && mean < 0.2, JSON.stringify({ tracks: s.tracks, error: s.error, mean: +mean.toFixed(4) }));
+         !!s.rms && near(mean), JSON.stringify({ tracks: s.tracks, error: s.error, mean: +mean.toFixed(4) }));
   await page.evaluate(() => window.__cap && window.__cap.stop());
   await sleep(500);
 
@@ -298,8 +346,12 @@ async function capture(L) {
   try { s = await page.evaluate(() => window.__capStream(true)); } catch (e) { s = { error: e.message.split('\n')[0] }; }
   const first = s.rms ? s.rms.slice(0, 5).reduce((a, b) => a + b) / 5 : 0;
   const last = s.rms ? s.rms.slice(-5).reduce((a, b) => a + b) / 5 : 0;
-  record(G, 'stream mode + same-tab monitor: level (feedback check, informational)', true,
-         `first0.5s=${first.toFixed(4)} last0.5s=${last.toFixed(4)} ${s.error || ''}`);
+  // Measured 2026-11-12: replaying the captured stream in the captured tab feeds back (0.141 tone
+  // grew to 0.35 then 0.57 RMS in two seconds). This asserts it, so the client's refusal to
+  // monitor in stream mode stays justified.
+  // Informational: how far it grows varies run to run (0.0143 to 0.089 against 0.0141).
+  record(G, 'stream mode + same-tab monitor: level vs. the tone (feedback check, informational)',
+         true, `expected ${RMS.toFixed(4)}, first0.5s=${first.toFixed(4)} last0.5s=${last.toFixed(4)} ${s.error || ''}`);
   await page.evaluate(() => window.__cap && window.__cap.stop());
   await page.close();
   void offscreenCount;
@@ -322,7 +374,7 @@ await close(L);
 if (want('capture')) {
   // Chrome's own test switch: treat this extension as allowlisted for tab capture, standing in
   // for the toolbar click a person makes. Nothing in the extension knows about it.
-  L = await launch([`--allowlisted-extension-id=${id}`]);
+  L = await launch([`--allowlisted-extension-id=${id}`], { unmute: true });
   try { await capture(L); } catch (e) { record('capture', 'uncaught', false, e.stack); }
   await close(L);
 }

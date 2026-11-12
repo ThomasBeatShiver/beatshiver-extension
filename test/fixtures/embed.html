@@ -33,6 +33,27 @@ if (KIND === 'pornhub') {
   ad.addEventListener('ended', () => { ad.remove(); content.play(); });
   ad.play();
   fx.el = () => content;
+} else if (KIND === 'xvideos-preroll') {
+  // The xvideos layout seen on the Android build (2026-11-12): the content <video> loads and
+  // sits paused; a second <video class="video-overlay"> -- no ad class, no ad host -- is added
+  // beside it in the same player and plays a short pre-roll; when it ends the content plays
+  // from 0. The ad's play() comes before its metadata, so for a moment its length is unknown.
+  host.innerHTML = '<div id="html5video"><div id="hlsplayer"><video id="content"></video></div></div>';
+  const content = host.querySelector('#content');
+  content.src = tone(120);
+  content.preload = 'auto';
+  content.addEventListener('loadedmetadata', () => {
+    setTimeout(() => {
+      const ad = document.createElement('video');
+      ad.className = 'video-overlay';
+      host.querySelector('#hlsplayer').append(ad);
+      ad.src = tone(4, 8000, 660);
+      ad.play();
+      ad.addEventListener('ended', () => { ad.remove(); content.play(); });
+      fx.ad = ad;
+    }, 300);
+  }, { once: true });
+  fx.el = () => content;
 } else if (KIND === 'soundcloud') {
   const a = new Audio(tone(30));
   a.play();

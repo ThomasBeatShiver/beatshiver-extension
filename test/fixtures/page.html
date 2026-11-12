@@ -38,9 +38,11 @@ window.__capPcm = async () => {
   return { sampleRate: cap.sampleRate, channels: cap.channels };
 };
 window.__capStream = async (monitor) => {
-  const cap = await bsx.startCapture({ mode: 'stream', monitor });
+  const cap = await bsx.startCapture({ mode: 'stream' });
   window.__cap = cap;
   const ctx = new AudioContext();
+  // Replay inside the captured tab: what a page would naively do to keep it audible.
+  if (monitor) ctx.createMediaStreamSource(cap.stream).connect(ctx.destination);
   const an = ctx.createAnalyser(); an.fftSize = 2048;
   ctx.createMediaStreamSource(cap.stream).connect(an);
   const buf = new Float32Array(an.fftSize);
