@@ -5,7 +5,7 @@ it exists in the site yet. `client/beatshiver-extension-client.js` is a working 
 implementation of the page side; the test page in `test/fixtures/page.html` uses it, and
 `npm test` exercises it.
 
-Only `https://beatshiver.com/*` top frames get the page relay (`src/sites.js`, `PAGE_MATCHES`).
+Only `https://beatshiver.com/*` and `https://qa.beatshiver.com/*` top frames get the page relay (`src/sites.js`, `PAGE_MATCHES`).
 Local `serve.py` (`localhost:8421`), `www.` and any QA host are **not** matched. See the open
 questions in README.md.
 

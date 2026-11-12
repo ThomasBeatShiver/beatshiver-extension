@@ -80,8 +80,9 @@
   const GENERIC_AD_CLASS = '(^|[\\s_-])(ad|ads|adroll|ad-?container|preroll|pre-roll|vast|ima-ad|advert)([\\s_-]|$)|adRoll|preRoll|PreRoll|vastVideo';
 
   /** The top frames that receive the clock and may ask for capture. */
-  const PAGE_MATCHES = ['https://beatshiver.com/*'];
-  const PAGE_ORIGINS = ['https://beatshiver.com'];
+  // qa.beatshiver.com is where the site's half ships first (the page's `QA` flag).
+  const PAGE_MATCHES = ['https://beatshiver.com/*', 'https://qa.beatshiver.com/*'];
+  const PAGE_ORIGINS = ['https://beatshiver.com', 'https://qa.beatshiver.com'];
 
   function patternToRegExp(p) {
     // Enough of the match-pattern grammar for the patterns above: scheme://host/path with `*`.
