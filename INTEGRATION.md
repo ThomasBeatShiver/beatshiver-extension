@@ -39,8 +39,10 @@ There are two signals. Use either one; the second also returns capabilities.
        clock: true,
        capture: ['stream', 'pcm'],      // [] on Firefox and Safari
        browser: 'chrome' | 'firefox' | 'safari',
-       captureFallback: null            // 'getDisplayMedia' where capture is []
-     } }
+       captureFallback: null,           // 'getDisplayMedia' where capture is []
+       sources: ['youtube']             // same as the top-level `sources` below
+     },
+     sources: ['youtube'] }             // sites the page may `source-open`; [] without capture
    ```
 
    The relay also posts one unsolicited `ready` (`replyTo: null`) at load. A page that registers
@@ -57,7 +59,7 @@ the page as:
   source: 'beatshiver-extension', v: 1, type: 'clock',
   frame: { frameId: 4, origin: 'https://www.xvideos.com', url: 'https://www.xvideos.com/embedframe/…' },
   seq: 37,                   // per frame, increasing
-  site: 'xvideos',           // id from src/sites.js: xvideos | pornhub | peertube | youtube | soundcloud
+  site: 'xvideos',           // id from src/sites.js: xvideos | pornhub | peertube | soundcloud
   event: 'tick',             // play | playing | pause | seeking | seeked | ratechange |
                              // durationchange | loadedmetadata | ended | emptied | waiting | tick
   fromPrimary: false,        // did the event come from the content element itself
@@ -93,7 +95,7 @@ the page as:
   2. An ad-network host in `src` (VAST/VPAID, doubleclick, trafficjunky, exoclick, …).
   3. Markup: ad-like class or id words on the element or its ancestors, across shadow roots.
      Per-site rules also apply: Pornhub content is `video.mgp_videoElement`, with a blob or
-     phncdn source; YouTube's player gets `.ad-showing`.
+     phncdn source; YouTube's player gets `.ad-showing` (on youtube.com, see below).
   4. Then content-selector match, then loaded, then the longest.
 - **Several embeds.** Use `frame.frameId` + `frame.origin` to tell frames apart. One page with
   one embed sees one stream.
@@ -188,6 +190,94 @@ if caps && caps.capture includes 'pcm':
 else:
     getDisplayMedia path, unchanged (Firefox, Safari, no extension)
 ```
+
+## Measure on the source (Chrome)
+
+Some sites are not clocked through their embed at all: they are measured on their own page, in
+their own tab (`measureOn: 'source'` in `src/sites.js`). YouTube is the only one so far. Its
+API policies forbid beatshiver.com to isolate the audio of its embed, so the YouTube embed gets
+no clock, and a YouTube track nobody has measured is measured once, in real time, on
+youtube.com. Every play with a script stays on beatshiver.com: the extension only provides the
+clock and the audio. It never drives the toy, never sends anything to the source page, and
+leaves its player, ads and UI alone.
+
+Which sites, and how their URLs are read, is configuration only:
+
+| field | meaning | YouTube |
+| --- | --- | --- |
+| `measureOn` | `'source'` = measured on the site's own page | `'source'` |
+| `pages` | match patterns of the site's pages (whole hosts: single-page apps) | `https://www.youtube.com/*`, `https://m.youtube.com/*` |
+| `itemPath` | regex for the pathname of an item page | `^/watch$` |
+| `refFrom` | how to read the item key: `{query:'v'}` or `{path:'<regex>'}` | `{query:'v'}` |
+| `pageUrl` | template the page builds `source-open.url` from | `https://www.youtube.com/watch?v={id}` |
+| `content`, `adPlayer`, … | the clock and ad rules, as for embeds | `#movie_player video.html5-main-video`, `.html5-video-player.ad-showing` / `.ad-interrupting` |
+
+`ready.sources` lists the ids the page may ask for. It is `[]` on Firefox and Safari: without
+tab capture there is nothing to measure with.
+
+### Messages
+
+```js
+// page -> extension
+{ source: 'beatshiver-page', v: 1, type: 'source-open', id: 'src-abc', site: 'youtube',
+  url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+  channels: 1, chunkFrames: 2048, sampleRate: 0 }   // optional, as for capture-start
+{ source: 'beatshiver-page', v: 1, type: 'source-close', id: 'src-abc' }
+
+// extension -> page: the session's state
+{ source: 'beatshiver-extension', v: 1, type: 'source', id: 'src-abc', state, reason? }
+
+// extension -> page: the source tab's clock (the embed clock shape, plus `ref`)
+{ source: 'beatshiver-extension', v: 1, type: 'clock',
+  frame: { source: 'youtube', id: 'src-abc', ref: 'dQw4w9WgXcQ',
+           url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
+  site: 'youtube', ref: 'dQw4w9WgXcQ', seq, event, fromPrimary, primaryChanged, adPlaying,
+  media, candidates, wallMs, perfMs }
+
+// extension -> page: the source tab's audio (the pcm shape; `id` is the session's)
+{ source: 'beatshiver-extension', v: 1, type: 'pcm', id: 'src-abc', site: 'youtube',
+  seq, sampleRate, channels, frames, wallMs, data: Float32Array }
+```
+
+A source clock's `frame` has **no** `origin` or `frameId`, so a page that routes embed clocks by
+origin never takes it for an embed's clock. Route on `frame.source` + `frame.id`.
+`onClock()` in the client skips source clocks; `openSource()` gets them.
+
+| `state` | meaning | what the page does |
+| --- | --- | --- |
+| `opened` | the source tab is open (`reused: true` when the same `id` asked again: its tab is shown) | show "Measuring on YouTube — keep that tab playing" |
+| `needs-gesture` | Chrome refused the capture: the user has not clicked the Beatshiver icon **on the source tab**. That tab's icon has the red `!` | tell the user to click the icon on the YouTube tab; `capturing` follows |
+| `capturing` | its audio is coming as `pcm` (`sampleRate`, `channels`) | feed the capture lane |
+| `ended` | the content `ended` (not an ad); capture stopped 0.5 s later, the beatshiver tab is focused again | finish the take |
+| `navigated` | `reason: 'ref-changed'` (another item in the same tab) or `'left-item'` (off `itemPath`); capture stopped | abort the take |
+| `closed` | `reason: 'tab-closed'` (the source tab), `'requested'` (the page's `source-close`; the extension closes the tab it opened), `'toolbar'` (the user clicked the icon again while capturing) | abort / done |
+| `error` | `reason`: refused `source-open` (not a beatshiver page, unknown or non-source site, url not one of the site's item pages, no tab capture), or the capture failed | treat as refused |
+
+`ended`, `navigated`, `closed` and `error` end the session; send a new `source-open` (a new
+`id`) to measure again.
+
+### Rules, the same for every site
+
+- **Validation.** `source-open` is refused unless `url` matches one of the site's `pages`, its
+  pathname matches `itemPath` and `refFrom` finds a ref in it.
+- **Where.** The new tab opens next to the beatshiver tab (`index + 1`, `openerTabId`), active.
+- **Clock.** Only the source tab's top frame. It reports while the URL is on `itemPath`; leaving
+  it sends one report with `ref: null`, which the background turns into `navigated`. SPA moves
+  are seen through `history.pushState` / `replaceState` / `popstate` hooks, not any site's own
+  events.
+- **Ads.** As for embeds: `adPlaying` while the player is flagged (YouTube: `ad-showing` /
+  `ad-interrupting` on `.html5-video-player`, which plays the ad in the same `<video>`). The
+  extension only reads the flag.
+- **Rate.** `media.playbackRate` is reported as is; the page refuses a take at rate ≠ 1.
+- **Capture.** Starts on the source tab's first clock (pcm mode, monitored so the user keeps
+  hearing YouTube). It is keyed on the source tab; its chunks go to the beatshiver tab only.
+- **The gesture.** Chrome grants tab capture for a tab only after a click on the extension
+  **in that tab**. A click on the beatshiver tab does not cover the YouTube tab. Tested only with
+  Chrome's `--allowlisted-extension-id` test switch, not with a person's click.
+- **A YouTube tab the user opened themselves** reports nowhere: the background tells its relay
+  to go quiet.
+- **Closing.** Either tab closing ends the session. A reload of the beatshiver tab ends it too
+  (the source tab is left open).
 
 ## Firefox and Safari
 
