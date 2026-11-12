@@ -194,17 +194,26 @@ async function fixtures(L) {
   await other.close();
 }
 
+// Start playback in each real embed: a real click on the player (Pornhub's player only starts
+// from its own click handler), then play() muted as a fallback for the others.
+async function startReal(page) {
+  for (const f of page.frames()) {
+    if (f === page.mainFrame()) continue;
+    if (f.url().startsWith('https://www.pornhub.com/')) {
+      await f.click('#player', { timeout: 3000 }).catch(() => {});
+      continue;
+    }
+    await f.evaluate(() => { const v = document.querySelector('video'); if (v) { v.muted = true; v.play().catch(() => {}); } })
+      .catch(() => {});
+  }
+}
+
 async function realEmbeds(L) {
   const G = 'real';
   const page = await L.ctx.newPage();
   await page.goto('https://beatshiver.com/__bsx/test.html?embeds=' + encodeURIComponent(Object.values(REAL).join(',')));
   await sleep(6000);
-  // Start playback the way a click would; muted so autoplay rules cannot refuse it.
-  for (const f of page.frames()) {
-    if (f === page.mainFrame()) continue;
-    await f.evaluate(() => { const v = document.querySelector('video'); if (v) { v.muted = true; v.play().catch(() => {}); } })
-      .catch(() => {});
-  }
+  await startReal(page);
   await sleep(10000);
   const clocks = await page.evaluate(() => window.__t.clocks);
   const by = byOrigin(clocks);
@@ -229,11 +238,7 @@ async function debugPage(L) {
   await page.goto(`chrome-extension://${L.id}/debug.html`);
   await page.waitForFunction(() => window.__bs && window.__bs.ready, null, { timeout: 10000 });
   await sleep(6000);
-  for (const f of page.frames()) {
-    if (f === page.mainFrame()) continue;
-    await f.evaluate(() => { const v = document.querySelector('video'); if (v) { v.muted = true; v.play().catch(() => {}); } })
-      .catch(() => {});
-  }
+  await startReal(page);
   await sleep(8000);
   const s = await page.evaluate(() => ({ caps: window.__bs.caps,
     by: Object.entries(window.__bs.clocks.reduce((m, c) => { (m[c.frame.origin] = m[c.frame.origin] || []).push(c.data.media && c.data.media.currentTime); return m; }, {}))
