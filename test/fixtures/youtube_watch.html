@@ -1,0 +1,36 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>fixture source page (served by the test at a youtube.com watch URL)</title>
+<style>body{margin:0;background:#111;color:#eee;font:12px monospace}</style></head>
+<body>
+<div id="movie_player" class="html5-video-player"><div class="html5-video-container">
+  <video class="video-stream html5-main-video"></video>
+</div></div>
+<script>
+// A stand-in for a YouTube watch page: the player element is flagged with `ad-showing` while an
+// ad plays in the same <video> (what sites.js's adPlayer rule reads), and the site moves between
+// items with history.pushState, not a document load.
+//   ?v=<ref>&dur=<seconds>&amp=<0..1>
+function tone(seconds, amp, rate = 8000, freq = 440) {
+  const n = Math.round(seconds * rate), b = new DataView(new ArrayBuffer(44 + n * 2));
+  const w = (o, s) => [...s].forEach((c, i) => b.setUint8(o + i, c.charCodeAt(0)));
+  w(0, 'RIFF'); b.setUint32(4, 36 + n * 2, true); w(8, 'WAVE'); w(12, 'fmt ');
+  b.setUint32(16, 16, true); b.setUint16(20, 1, true); b.setUint16(22, 1, true);
+  b.setUint32(24, rate, true); b.setUint32(28, rate * 2, true); b.setUint16(32, 2, true);
+  b.setUint16(34, 16, true); w(36, 'data'); b.setUint32(40, n * 2, true);
+  const a = Math.round(amp * 32767);
+  for (let i = 0; i < n; i++) b.setInt16(44 + i * 2, Math.round(Math.sin(2 * Math.PI * freq * i / rate) * a), true);
+  return URL.createObjectURL(new Blob([b.buffer], { type: 'audio/wav' }));
+}
+const q = new URLSearchParams(location.search);
+const player = document.getElementById('movie_player');
+const v = player.querySelector('video');
+v.src = tone(+q.get('dur') || 30, +q.get('amp') || 0.02);
+v.play().catch(e => { window.__playErr = String(e); });
+window.__fx = {
+  ad(on) { player.classList.toggle('ad-showing', !!on); },
+  nav(ref) { history.pushState({}, '', '/watch?v=' + encodeURIComponent(ref)); },
+  leave() { history.pushState({}, '', '/feed/subscriptions'); },
+  state: () => ({ t: v.currentTime, paused: v.paused, ended: v.ended, cls: player.className }),
+};
+</script>
+</body></html>

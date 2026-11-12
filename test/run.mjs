@@ -6,7 +6,8 @@
 //
 //   node test/run.mjs                 all groups, headless (new headless)
 //   node test/run.mjs --headful       same, with a window
-//   node test/run.mjs --only=real     one group: fixtures | real | debug | gesture | capture
+//   node test/run.mjs --only=real     one group: fixtures | real | debug | gesture | capture |
+//                                     source | source-real
 //   node test/run.mjs --no-real       skip the groups that need the public internet
 //
 // beatshiver.com is never contacted: the test serves its own page at https://beatshiver.com/__bsx/
@@ -15,6 +16,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import https from 'node:https';
 import { execFileSync } from 'node:child_process';
 import { chromium } from 'playwright';
 
@@ -55,6 +57,39 @@ function wav(seconds, rate = 8000, freq = 330) {
   b.writeUInt16LE(16, 34); b.write('data', 36); b.writeUInt32LE(n * 2, 40);
   for (let i = 0; i < n; i++) b.writeInt16LE(Math.round(Math.sin(2 * Math.PI * freq * i / rate) * 3000), 44 + i * 2);
   return b;
+}
+
+// ---- the source fixture at the real www.youtube.com --------------------------------------------
+// A tab the extension opens itself (chrome.tabs.create) starts loading before Playwright attaches
+// to it, so ctx.route never sees that navigation (measured: the real youtube.com loaded). The
+// source group therefore maps www.youtube.com to a local HTTPS server with a throwaway
+// self-signed certificate (Chromium's resolver rules + ignored certificate errors).
+function opensslBin() {
+  for (const b of ['openssl', 'C:/Program Files/Git/usr/bin/openssl.exe',
+                   'C:/Program Files/Git/mingw64/bin/openssl.exe']) {
+    try { execFileSync(b, ['version'], { stdio: 'ignore' }); return b; } catch (e) {}
+  }
+  return null;
+}
+async function ytServer() {
+  const bin = opensslBin();
+  if (!bin) throw new Error('openssl not found: the source group needs it for its local https fixture');
+  const key = path.join(OUT, 'yt-key.pem'), cert = path.join(OUT, 'yt-cert.pem');
+  execFileSync(bin, ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', key, '-out', cert,
+                     '-days', '2', '-subj', '/CN=www.youtube.com',
+                     '-addext', 'subjectAltName=DNS:www.youtube.com'], { stdio: 'ignore' });
+  const srv = https.createServer({ key: fs.readFileSync(key), cert: fs.readFileSync(cert) }, (req, res) => {
+    const u = new URL(req.url, 'https://www.youtube.com');
+    const file = u.pathname === '/watch' ? 'youtube_watch.html'
+      : u.pathname.startsWith('/embed/') ? 'embed.html' : null;
+    if (!file) { res.writeHead(404); res.end(); return; }
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end(fs.readFileSync(path.join(FIX, file)));
+  });
+  await new Promise(r => srv.listen(0, '127.0.0.1', r));
+  const port = srv.address().port;
+  return { srv, args: [`--host-resolver-rules=MAP www.youtube.com 127.0.0.1:${port}`,
+                       '--ignore-certificate-errors'] };
 }
 
 async function launch(extraArgs = [], { unmute = false } = {}) {
@@ -101,6 +136,9 @@ async function launch(extraArgs = [], { unmute = false } = {}) {
   for (const h of ['https://www.pornhub.com', 'https://www.xvideos.com', 'https://w.soundcloud.com']) {
     await ctx.route(h + '/__bsx/**', fixtureEmbed);
   }
+  // A YouTube embed (no longer clocked). Only BSX* refs: live youtube.com stays reachable. The
+  // watch-page fixture is served by ytServer() instead (see there).
+  await ctx.route(/^https:\/\/www\.youtube\.com\/embed\/BSXFIXTURE/, fixtureEmbed);
   let sw = ctx.serviceWorkers()[0];
   if (!sw) sw = await ctx.waitForEvent('serviceworker', { timeout: 15000 });
   const id = new URL(sw.url()).host;
@@ -373,8 +411,278 @@ async function capture(L) {
   void offscreenCount;
 }
 
+// ---- measure on the source (sites.js measureOn: 'source'; YouTube is the configured one) ------
+
+const YT_FIX = 'https://www.youtube.com/watch?v=BSXFIXTURE';
+
+/** The extension's tabs and its source sessions, read inside the service worker. */
+async function swState(L) {
+  return L.sw.evaluate(async () => {
+    const tabs = (await chrome.tabs.query({})).map(t => ({ id: t.id, index: t.index, active: t.active,
+                                                           opener: t.openerTabId, windowId: t.windowId }));
+    const { sources } = await chrome.storage.session.get('sources');
+    return { tabs, sources: sources || {} };
+  });
+}
+const badge = (L, tabId) => L.sw.evaluate(id => chrome.action.getBadgeText({ tabId: id }), tabId);
+
+async function until(fn, ms = 8000, step = 200) {
+  const t0 = Date.now();
+  let v;
+  while (Date.now() - t0 < ms) { v = await fn(); if (v) return v; await sleep(step); }
+  return v;
+}
+
+/** Opens a source session from the beatshiver page; resolves with its id and the new tab. */
+async function openSource(L, page, url) {
+  const newTab = L.ctx.waitForEvent('page', { timeout: 10000 });
+  const id = await page.evaluate(u => window.__openSource('youtube', u), url);
+  const tab = await newTab;
+  // The 'page' event fires on the new tab's about:blank; wait for the source page itself.
+  await tab.waitForURL(/^https:\/\/www\.youtube\.com\/watch/, { timeout: 10000 }).catch(() => {});
+  await tab.waitForFunction(() => window.__fx, null, { timeout: 10000 }).catch(() => {});
+  return { id, tab };
+}
+const S = (page, id) => page.evaluate(i => {
+  const s = window.__t.src[i];
+  return { states: s.states, clocks: s.clocks, pcm: s.pcm };
+}, id);
+
+async function source(L) {
+  const G = 'source';
+  const page = await L.ctx.newPage();
+  // A YouTube *embed* on the page: no longer clocked at all (measured on youtube.com instead).
+  await page.goto('https://beatshiver.com/__bsx/test.html?embeds='
+    + encodeURIComponent('https://www.youtube.com/embed/BSXFIXTURE?kind=xvideos'));
+  await page.waitForFunction(() => window.__t && window.__t.detect !== null, null, { timeout: 5000 });
+  const det = await page.evaluate(() => window.__t.detect);
+  record(G, 'ready advertises sources: [youtube]',
+         !!det && JSON.stringify(det.sources) === '["youtube"]', JSON.stringify(det && det.sources));
+  await sleep(2500);
+  const ytFrame = page.frames().find(f => f.url().startsWith('https://www.youtube.com/embed/'));
+  const embedT = ytFrame ? await ytFrame.evaluate(() => window.__fx.state().t) : null;
+  const embedClocks = await page.evaluate(() => window.__t.raw.filter(m => m.type === 'clock').length);
+  record(G, 'youtube embed gets no clock', !!ytFrame && embedT > 1 && embedClocks === 0,
+         `embed playing t=${embedT && embedT.toFixed(2)}, clocks=${embedClocks}`);
+
+  // Validation: only the site's own item pages are opened.
+  const tabsBefore = (await swState(L)).tabs.length;
+  const refused = [];
+  for (const [site, url] of [['youtube', 'https://www.youtube.com/feed/subscriptions'],
+                             ['youtube', 'https://evil.example/watch?v=BSXFIXTURE'],
+                             ['youtube', 'https://www.youtube.com.evil.example/watch?v=x'],
+                             ['xvideos', 'https://www.xvideos.com/embedframe/BSXFIXTURE'],
+                             ['youtube', 'https://www.youtube.com/embed/BSXFIXTURE']]) {
+    const r = await page.evaluate(async ([s, u]) => {
+      const id = 'v-' + Math.random();
+      window.postMessage({ source: 'beatshiver-page', v: 1, type: 'source-open', id, site: s, url: u }, location.origin);
+      for (let i = 0; i < 30; i++) {
+        await new Promise(r => setTimeout(r, 50));
+        const m = window.__t.raw.find(x => x.type === 'source' && x.id === id);
+        if (m) return m.state;
+      }
+      return 'no answer';
+    }, [site, url]);
+    refused.push(`${site} ${url} -> ${r}`);
+  }
+  const tabsAfter = (await swState(L)).tabs.length;
+  record(G, 'source-open refuses urls off the site\'s pages / itemPath',
+         refused.every(x => x.endsWith('-> error')) && tabsAfter === tabsBefore,
+         refused.join('; '));
+
+  // A YouTube tab the user opened themselves: nothing reaches the page.
+  const own = await L.ctx.newPage();
+  await own.goto(YT_FIX + '&dur=30');
+  await sleep(1500);
+  const ownLeak = await page.evaluate(() => window.__t.raw.filter(m => m.type === 'clock').length);
+  record(G, 'a youtube tab not opened by source-open reports nowhere', ownLeak === 0,
+         `clocks=${ownLeak}`);
+  await own.close();
+
+  // Open, clock relayed cross-tab with the contract's frame.
+  const { id, tab: yt } = await openSource(L, page, YT_FIX);
+  const tagged = await until(async () => {
+    const s = await S(page, id);
+    return s.clocks.filter(x => x.media && x.media.currentTime > 1).length > 3 ? s : null;
+  }, 8000);
+  const st = await swState(L);
+  const sess = st.sources[id];
+  const pageTab = st.tabs.find(t => t.id === (sess && sess.consumerTabId));
+  const ytTab = st.tabs.find(t => t.id === (sess && sess.targetTabId));
+  record(G, 'source-open opens the url in a new tab next to the page',
+         !!sess && !!ytTab && !!pageTab && ytTab.index === pageTab.index + 1
+         && ytTab.opener === pageTab.id && yt.url() === YT_FIX,
+         JSON.stringify({ sess, pageTab, ytTab, url: yt.url() }));
+  const s1 = tagged || await S(page, id);
+  const c = s1.clocks[s1.clocks.length - 1];
+  const ts = s1.clocks.filter(x => x.media).map(x => x.media.currentTime);
+  const frameKeys = c ? Object.keys(c.frame).sort().join(',') : '';
+  record(G, 'clock tagged frame:{source,id,ref,url} and relayed to the beatshiver tab',
+         !!c && c.frame.source === 'youtube' && c.frame.id === id && c.frame.ref === 'BSXFIXTURE'
+         && c.frame.url === YT_FIX && frameKeys === 'id,ref,source,url' && c.ref === 'BSXFIXTURE'
+         && c.site === 'youtube' && ts.length > 3 && ts[ts.length - 1] > ts[0],
+         c ? `frame=${JSON.stringify(c.frame)} t ${ts[0] && ts[0].toFixed(2)} -> ${ts[ts.length - 1] && ts[ts.length - 1].toFixed(2)}` : 'no clock');
+  const leakedToOnClock = await page.evaluate(i => window.__t.clocks.filter(m => m.frame && m.frame.id === i).length, id);
+  record(G, 'source clocks never reach the embed onClock() listeners', leakedToOnClock === 0,
+         `leaked=${leakedToOnClock}`);
+  const states1 = (await S(page, id)).states.map(m => m.state);
+  const b1 = ytTab ? await badge(L, ytTab.id) : null;
+  const bPage = pageTab ? await badge(L, pageTab.id) : null;
+  record(G, 'without the toolbar click: needs-gesture, badge on the youtube tab (not the page)',
+         states1[0] === 'opened' && states1.includes('needs-gesture') && b1 === '!' && bPage === '',
+         `states=${states1.join(',')} badge yt=${JSON.stringify(b1)} page=${JSON.stringify(bPage)}`);
+
+  // Ad: the player's ad class holds the clock; nothing on the page is touched.
+  await yt.evaluate(() => window.__fx.ad(true));
+  await sleep(900);
+  const during = (await S(page, id)).clocks.slice(-2);
+  const clsDuring = await yt.evaluate(() => window.__fx.state().cls);
+  await yt.evaluate(() => window.__fx.ad(false));
+  await sleep(900);
+  const after = (await S(page, id)).clocks.slice(-1)[0];
+  const clsAfter = await yt.evaluate(() => window.__fx.state().cls);
+  record(G, 'ad class on the player flags adPlaying, clears after; the page\'s classes untouched',
+         during.length === 2 && during.every(x => x.adPlaying === true) && after && after.adPlaying === false
+         && clsDuring === 'html5-video-player ad-showing' && clsAfter === 'html5-video-player',
+         `during=${during.map(x => x.adPlaying)} after=${after && after.adPlaying} cls=${clsDuring}|${clsAfter}`);
+
+  // Navigation: another video in the same tab (pushState) -> navigated, clocks stop, badge off.
+  await yt.evaluate(() => window.__fx.nav('BSXOTHER'));
+  const nav = await until(async () => (await S(page, id)).states.find(m => m.state === 'navigated'), 4000);
+  const n0 = (await S(page, id)).clocks.length;
+  await sleep(1200);
+  const s2 = await S(page, id);
+  const st2 = await swState(L);
+  const b2 = ytTab ? await badge(L, ytTab.id) : null;
+  record(G, 'ref change (pushState to another v=) -> navigated; relay stops; session gone',
+         !!nav && s2.clocks.length === n0 && !st2.sources[id] && b2 === ''
+         && s2.clocks.every(x => x.frame.ref === 'BSXFIXTURE'),
+         `navigated=${JSON.stringify(nav)} clocks ${n0} -> ${s2.clocks.length} badge=${JSON.stringify(b2)}`);
+  await yt.close();
+
+  // Leaving the item path counts as navigation too.
+  {
+    const { id: id2, tab: yt2 } = await openSource(L, page, YT_FIX);
+    await until(async () => (await S(page, id2)).clocks.length > 2, 6000);
+    await yt2.evaluate(() => window.__fx.leave());
+    const nav2 = await until(async () => (await S(page, id2)).states.find(m => m.state === 'navigated'), 4000);
+    record(G, 'leaving the item path (/feed/...) -> navigated', !!nav2 && nav2.reason === 'left-item',
+           JSON.stringify(nav2));
+    await yt2.close();
+  }
+
+  // Closing the source tab -> closed (tab-closed) to the page.
+  {
+    const { id: id3, tab: yt3 } = await openSource(L, page, YT_FIX);
+    await until(async () => (await S(page, id3)).clocks.length > 1, 6000);
+    await yt3.close();
+    const cl = await until(async () => (await S(page, id3)).states.find(m => m.state === 'closed'), 4000);
+    record(G, 'closing the source tab -> closed (tab-closed)', !!cl && cl.reason === 'tab-closed',
+           JSON.stringify(cl));
+  }
+
+  // source-close from the page -> closed, and the tab it opened is removed.
+  {
+    const { id: id4, tab: yt4 } = await openSource(L, page, YT_FIX);
+    await until(async () => (await S(page, id4)).clocks.length > 1, 6000);
+    const gone = new Promise(r => yt4.once('close', () => r(true)));
+    await page.evaluate(i => window.__closeSource(i), id4);
+    const cl = await until(async () => (await S(page, id4)).states.find(m => m.state === 'closed'), 4000);
+    const closed = await Promise.race([gone, sleep(3000).then(() => false)]);
+    record(G, 'source-close from the page -> closed, source tab removed',
+           !!cl && cl.reason === 'requested' && closed, `${JSON.stringify(cl)} tabClosed=${closed}`);
+  }
+  await page.close();
+}
+
+async function sourceCapture(L) {
+  const G = 'source';
+  const page = await L.ctx.newPage();
+  await page.goto('https://beatshiver.com/__bsx/test.html');
+  await page.waitForFunction(() => window.__t && window.__t.detect !== null, null, { timeout: 5000 });
+  // 8 s tone at AMP: capture it, then let it end.
+  const { id, tab: yt } = await openSource(L, page, YT_FIX + `&dur=8&amp=${AMP}`);
+  const pageTabId = await until(async () => {
+    const x = (await swState(L)).sources[id];
+    return x ? x.consumerTabId : null;
+  }, 3000);
+  const cap = await until(async () => (await S(page, id)).states.find(m => m.state === 'capturing'), 8000);
+  await sleep(3000);
+  const s = await S(page, id);
+  const rms = s.pcm.n ? Math.sqrt(s.pcm.sumSq / s.pcm.n) : 0;
+  record(G, 'two-tab capture: youtube tab audio arrives as pcm on the beatshiver tab (id = session)',
+         !!cap && s.pcm.chunks > 10 && near(rms) && Object.keys(s.pcm.ids).join() === id
+         && s.pcm.site === 'youtube',
+         `capturing=${JSON.stringify(cap)} chunks=${s.pcm.chunks} rms=${rms.toFixed(4)} (tone ${RMS.toFixed(4)}) ids=${JSON.stringify(s.pcm.ids)} site=${s.pcm.site}`);
+  const ownPcm = await page.evaluate(() => window.__t.pcm.chunks);
+  record(G, 'source pcm is not mixed into the page\'s own capture listeners', ownPcm === 0,
+         `own chunks=${ownPcm}`);
+  const end = await until(async () => (await S(page, id)).states.find(m => m.state === 'ended'), 12000, 300);
+  await sleep(600);
+  const st = await swState(L);
+  const active = st.tabs.filter(t => t.active).map(t => t.id);
+  const c1 = (await S(page, id)).pcm.chunks;
+  await sleep(800);
+  const c2 = (await S(page, id)).pcm.chunks;
+  record(G, 'at ended: source ended, capture stopped, beatshiver tab focused again',
+         !!end && c1 === c2 && pageTabId != null && active.includes(pageTabId) && !st.sources[id],
+         `ended=${JSON.stringify(end)} chunks ${c1}->${c2} active=${JSON.stringify(active)} page=${pageTabId}`);
+  await yt.close().catch(() => {});
+  await page.close();
+}
+
+// Read-only look at live youtube.com: do the configured selectors resolve on a real watch page,
+// and does the source clock see it? Nothing is clicked; no ad is touched.
+const REAL_YT = 'https://www.youtube.com/watch?v=jNQXAC9IVRw';
+async function sourceReal(L) {
+  const G = 'source-real';
+  const probe = async (page, url) => {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.evaluate(() => {
+      window.__bsc = [];
+      document.addEventListener('beatshiver:clock', e => { try { window.__bsc.push(JSON.parse(e.detail)); } catch (x) {} });
+    });
+    await sleep(8000);
+    return page.evaluate(() => {
+      const player = document.querySelector('#movie_player');
+      const content = document.querySelector('#movie_player video.html5-main-video');
+      const last = window.__bsc[window.__bsc.length - 1];
+      return {
+        url: location.href,
+        player: !!player, playerClass: player ? player.className.slice(0, 120) : null,
+        playerIsHtml5: !!(player && player.matches('.html5-video-player')),
+        content: !!content, videos: document.querySelectorAll('video').length,
+        adNow: !!(player && player.matches('.ad-showing, .ad-interrupting')),
+        clocks: window.__bsc.length, ref: last ? last.ref : null, media: last ? !!last.media : null,
+      };
+    });
+  };
+  const page = await L.ctx.newPage();
+  let r;
+  try { r = await probe(page, REAL_YT); } catch (e) { r = { error: e.message.split('\n')[0] }; }
+  record(G, 'live www.youtube.com watch page: #movie_player.html5-video-player + content video resolve',
+         !!r.playerIsHtml5 && !!r.content, JSON.stringify(r));
+  record(G, 'live www.youtube.com: source clock reports ref from the page (informational)',
+         true, `clocks=${r.clocks} ref=${r.ref} media=${r.media}`);
+  await page.close();
+  // m.youtube.com: serve it a phone user agent, or it redirects to www.
+  const m = await L.ctx.newPage();
+  try {
+    const cdp = await L.ctx.newCDPSession(m);
+    await cdp.send('Emulation.setUserAgentOverride', {
+      userAgent: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) '
+        + 'Chrome/130.0.0.0 Mobile Safari/537.36' });
+    await cdp.send('Emulation.setDeviceMetricsOverride', { width: 412, height: 915, deviceScaleFactor: 2, mobile: true });
+    r = await probe(m, REAL_YT.replace('www.', 'm.'));
+  } catch (e) { r = { error: e.message.split('\n')[0] }; }
+  record(G, 'live m.youtube.com watch page: #movie_player.html5-video-player + content video resolve',
+         !!r.playerIsHtml5 && !!r.content && /^https:\/\/m\.youtube\.com\//.test(r.url || ''), JSON.stringify(r));
+  await m.close();
+}
+
 // ---- main -------------------------------------------------------------------------------------
-const want = g => (!ONLY || ONLY === g) && !(NO_REAL && (g === 'real' || g === 'debug'));
+const want = g => (!ONLY || ONLY === g)
+  && !(NO_REAL && (g === 'real' || g === 'debug' || g === 'source-real'));
 
 let L = await launch();
 console.log(`extension id ${L.id} (${HEADFUL ? 'headful' : 'headless'})`);
@@ -384,6 +692,9 @@ try {
   if (want('debug')) await debugPage(L);
   if (want('gesture')) await gesture(L);
 } catch (e) { record('harness', 'uncaught', false, e.stack); }
+if (want('source-real')) {
+  try { await sourceReal(L); } catch (e) { record('source-real', 'uncaught', false, e.stack); }
+}
 const id = L.id;
 await close(L);
 
@@ -393,6 +704,20 @@ if (want('capture')) {
   L = await launch([`--allowlisted-extension-id=${id}`], { unmute: true });
   try { await capture(L); } catch (e) { record('capture', 'uncaught', false, e.stack); }
   await close(L);
+}
+if (want('source')) {
+  let yts = null;
+  try {
+    yts = await ytServer();
+    L = await launch(yts.args);
+    try { await source(L); } catch (e) { record('source', 'uncaught', false, e.stack); }
+    await close(L);
+    // The two-tab capture needs the same stand-in for the toolbar click, here on the YouTube tab.
+    L = await launch([...yts.args, `--allowlisted-extension-id=${id}`], { unmute: true });
+    try { await sourceCapture(L); } catch (e) { record('source', 'uncaught (capture)', false, e.stack); }
+    await close(L);
+  } catch (e) { record('source', 'setup', false, e.message); }
+  if (yts) yts.srv.close();
 }
 
 const failed = results.filter(r => !r.ok);

@@ -55,6 +55,30 @@ window.__capStream = async (monitor) => {
   ctx.close();
   return { tracks: cap.stream.getAudioTracks().map(t => t.label + '/' + t.readyState), rms };
 };
+// Measure on the source: every session's states, clocks and PCM, by session id.
+T.src = {};
+window.__openSource = (site, url) => {
+  let S;
+  const s = bsx.openSource({ site, url,
+    onState: m => S.states.push(m),
+    onClock: m => S.clocks.push(m),
+    onPcm: (f, m) => {
+      S.pcm.chunks++; S.pcm.sampleRate = m.sampleRate; S.pcm.ids[m.id] = (S.pcm.ids[m.id] || 0) + 1;
+      S.pcm.site = m.site;
+      let x = 0; for (const y of f) x += y * y; S.pcm.sumSq += x; S.pcm.n += f.length;
+    } });
+  S = T.src[s.id] = { states: [], clocks: [], pcm: { chunks: 0, sumSq: 0, n: 0, ids: {} }, close: s.close };
+  return s.id;
+};
+window.__closeSource = id => T.src[id].close();
+// Raw messages too, to check what reaches the page unfiltered.
+T.raw = [];
+window.addEventListener('message', ev => {
+  if (ev.source === window && ev.data && ev.data.source === 'beatshiver-extension'
+      && (ev.data.type === 'clock' || ev.data.type === 'source')) {
+    T.raw.push({ type: ev.data.type, frame: ev.data.frame, state: ev.data.state, id: ev.data.id });
+  }
+});
 window.__capError = async (mode) => {
   try { await bsx.startCapture({ mode }); return 'started'; }
   catch (e) { window.__pendingErr = e; return e.name + ': ' + e.message; }
