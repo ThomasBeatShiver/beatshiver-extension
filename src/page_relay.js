@@ -29,7 +29,10 @@
 
   async function announce(replyTo) {
     const c = await getCaps();
-    toPage({ type: 'ready', version, replyTo: replyTo || null, capabilities: c });
+    // `sources`: the sites the page may `source-open` (sites.js `measureOn: 'source'`), [] where
+    // the browser cannot capture. Also in capabilities, beside `capture`.
+    toPage({ type: 'ready', version, replyTo: replyTo || null, capabilities: c,
+             sources: c.sources || [] });
   }
 
   // Register this tab as a listener. Re-sent on every load, so a background that restarted and
@@ -69,6 +72,24 @@
                           error: String(err && err.message || err) }));
         break;
       }
+      case 'source-open':
+      case 'source-close': {
+        // Measure on the source site's own page. The background validates `url` against the
+        // site's configured pages; this only passes plain strings on.
+        const req = { type: m.type, id: String(m.id || '') };
+        if (m.type === 'source-open') {
+          req.site = String(m.site || '');
+          req.url = String(m.url || '');
+          if (m.channels === 2) req.channels = 2;
+          if (m.chunkFrames) req.chunkFrames = m.chunkFrames | 0;
+          if (m.sampleRate) req.sampleRate = m.sampleRate | 0;
+        }
+        ext.runtime.sendMessage(req).then(
+          res => { if (res) toPage(res); },
+          err => toPage({ type: 'source', id: req.id, state: 'error',
+                          reason: String(err && err.message || err) }));
+        break;
+      }
     }
   });
 
@@ -83,13 +104,16 @@
     if (!msg || typeof msg.type !== 'string') return;
     if (msg.type === 'clock') {
       toPage({ type: 'clock', frame: msg.frame, ...msg.data });
-    } else if (msg.type === 'capture') {
+    } else if (msg.type === 'capture' || msg.type === 'source') {
       toPage(msg);
     } else if (msg.type === 'pcm') {
       const data = b64ToFloat32(msg.b64);
-      toPage({ type: 'pcm', id: msg.id, seq: msg.seq, sampleRate: msg.sampleRate,
-               channels: msg.channels, frames: msg.frames, wallMs: msg.wallMs, data },
-             [data.buffer]);
+      const out = { type: 'pcm', id: msg.id, seq: msg.seq, sampleRate: msg.sampleRate,
+                    channels: msg.channels, frames: msg.frames, wallMs: msg.wallMs, data };
+      // Audio of a source tab: `id` is the source session's, `site` its site id. (Not `source`:
+      // that is the envelope's.)
+      if (msg.site) out.site = msg.site;
+      toPage(out, [data.buffer]);
     }
   });
 })();

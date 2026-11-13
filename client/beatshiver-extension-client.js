@@ -6,6 +6,7 @@
 //   const ext = await detectExtension();           // null when not installed
 //   const off = onClock(msg => ...);               // every clock report from every embed frame
 //   const cap = await startCapture({ mode: 'stream' });  // { stream, stop } -- or throws
+//   const src = openSource({ site: 'youtube', url, onClock, onPcm, onState });  // { id, close }
 //
 // Capture throws an Error whose `name` says what to do next:
 //   ExtensionCaptureUnsupported -- Firefox/Safari: use getDisplayMedia (today's path)
@@ -30,7 +31,11 @@ function listen(fn) {
   return () => window.removeEventListener('message', h);
 }
 
-/** Resolves with `{version, capabilities}` or null if no extension answers in `timeoutMs`. */
+/**
+ * Resolves with `{version, capabilities, sources}` or null if no extension answers in
+ * `timeoutMs`. `sources` lists the site ids `openSource()` takes (e.g. ['youtube']); [] where the
+ * browser cannot capture.
+ */
 export function detectExtension({ timeoutMs = 500 } = {}) {
   const attr = document.documentElement.getAttribute('data-beatshiver-extension');
   return new Promise(resolve => {
@@ -39,7 +44,8 @@ export function detectExtension({ timeoutMs = 500 } = {}) {
     const off = listen(m => {
       if (m.type === 'ready' && (m.replyTo === id || m.replyTo == null)) {
         clearTimeout(t); off();
-        resolve({ version: m.version, capabilities: m.capabilities });
+        resolve({ version: m.version, capabilities: m.capabilities,
+                  sources: m.sources || (m.capabilities && m.capabilities.sources) || [] });
       }
     });
     post({ type: 'hello', id });
@@ -47,12 +53,44 @@ export function detectExtension({ timeoutMs = 500 } = {}) {
 }
 
 /**
- * Every clock report. `msg.frame.origin` says which embed; `msg.media` is null until the frame
- * has a content element. Position now = media.currentTime + (Date.now() - wallMs) / 1000 *
- * playbackRate while !paused && !adPlaying.
+ * Every embed clock report. `msg.frame.origin` says which embed; `msg.media` is null until the
+ * frame has a content element. Position now = media.currentTime + (Date.now() - wallMs) / 1000 *
+ * playbackRate while !paused && !adPlaying. Source clocks (`frame.source` set) are not passed
+ * here: they belong to the `openSource()` session that asked for them.
  */
 export function onClock(fn) {
-  return listen(m => { if (m.type === 'clock') fn(m); });
+  return listen(m => { if (m.type === 'clock' && !(m.frame && m.frame.source)) fn(m); });
+}
+
+/**
+ * Measure on the source site's own page (sites.js `measureOn: 'source'`). The extension opens
+ * `url` in a new tab beside this one, sends that tab's clock here and captures its audio here.
+ * Nothing plays a script there; the take is analysed here and the script plays here.
+ *
+ *   onState({id, state, reason?}) -- state: opened | needs-gesture | capturing | ended | closed |
+ *                                    navigated | error. needs-gesture: ask the user to click the
+ *                                    Beatshiver toolbar icon *on the source tab*.
+ *   onClock(msg)                  -- the clock, with msg.frame = {source, id, ref, url}
+ *   onPcm(Float32Array, msg)      -- the source tab's audio, msg.id = this session's id
+ *
+ * Returns `{ id, close }`. A session ends at ended / closed / navigated / error.
+ */
+export function openSource({ site, url, onState = null, onClock: onSrcClock = null, onPcm = null,
+                             channels = 1, chunkFrames = 2048 } = {}) {
+  const id = 'src-' + Math.random().toString(36).slice(2);
+  const END = ['ended', 'closed', 'navigated', 'error'];
+  const off = listen(m => {
+    if (m.type === 'source' && m.id === id) {
+      if (onState) onState(m);
+      if (END.includes(m.state)) off();
+    } else if (m.type === 'clock' && m.frame && m.frame.source && m.frame.id === id) {
+      if (onSrcClock) onSrcClock(m);
+    } else if (m.type === 'pcm' && m.id === id) {
+      if (onPcm) onPcm(m.data, m);
+    }
+  });
+  post({ type: 'source-open', id, site, url, channels, chunkFrames });
+  return { id, close: () => { post({ type: 'source-close', id }); } };
 }
 
 /** Seconds into the content right now, extrapolated from one clock message. */

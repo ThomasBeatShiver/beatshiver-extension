@@ -1,4 +1,5 @@
-// MAIN world, document_start, every frame on an embed origin (see sites.js).
+// MAIN world, document_start, every frame on an embed origin, and the top frame of a
+// measure-on-source site's pages (see sites.js).
 //
 // Finds the frame's media elements wherever they are -- light DOM, open or closed shadow roots,
 // or never attached at all (SoundCloud's widget plays a detached `new Audio()`) -- and reports
@@ -22,10 +23,16 @@
   try { delete globalThis.BEATSHIVER_SITES; } catch (e) { globalThis.BEATSHIVER_SITES = undefined; }
   if (!SITES) return;
 
-  // Not inside a frame: somebody opened the embed URL directly. Nothing to report to.
-  if (window === window.top) return;
-
   const site = SITES.siteFor(location.href) || { id: 'unknown' };
+  // A measure-on-source site (sites.js `measureOn: 'source'`) is clocked in its own top frame,
+  // in its own tab. Any other top frame is an embed URL somebody opened directly: nothing to
+  // report to.
+  const SOURCE = window === window.top && site.measureOn === 'source';
+  if (window === window.top && !SOURCE) return;
+  // The item the source page shows, read from the URL by the site's `refFrom` rule; null while
+  // the page is off its `itemPath` (home, search, a channel), where nothing is reported.
+  const refNow = () => SITES.refFor(site, location.href);
+  let lastRef = SOURCE ? refNow() : null;
   const adClassRe = new RegExp(SITES.GENERIC_AD_CLASS + (site.adClass ? '|' + site.adClass : ''));
   const contentSrcRe = site.contentSrc ? new RegExp(site.contentSrc) : null;
 
@@ -36,7 +43,7 @@
   const IDLE_TICK_MS = 2000; // heartbeat while paused, so a page that loaded late still hears
 
   const ids = new WeakMap();
-  const tracked = new Set(); // strong refs are fine: an embed frame holds one or two players
+  const tracked = new Set(); // strong refs are fine: a frame holds one or a few players
   let nextId = 1;
   let lastPrimary = null;
   let seq = 0;
@@ -234,6 +241,13 @@
   }
 
   function report(event, from) {
+    let ref = null;
+    if (SOURCE) {
+      ref = refNow();
+      // Off the item path: one report with ref null says the page left the item, then silence.
+      if (!ref && !lastRef) { schedule(event === 'tick'); return; }
+      lastRef = ref;
+    }
     const primary = pickPrimary();
     const fromPrimary = !!from && from === primary;
     // Events from a non-primary element are reported only as an ad state change; their clock is
@@ -251,11 +265,36 @@
       wallMs: Date.now(),
       perfMs: performance.now(),
     };
+    if (SOURCE) msg.ref = ref;
     lastPrimary = primary;
     try {
       document.dispatchEvent(new CustomEvent(EVENT_NAME, { detail: JSON.stringify(msg) }));
     } catch (e) {}
     schedule(event === 'tick');
+  }
+
+  // ---- single-page navigation (source pages only) ---------------------------------------------
+  // Source sites move between items without a document load. Generic hooks, not any site's own
+  // events: wrap history.pushState/replaceState and listen for popstate, and report at once when
+  // the ref changed, so the page hears `navigate` before the next tick.
+  if (SOURCE) {
+    const check = () => {
+      const r = refNow();
+      if (r !== lastRef) report('navigate', null);
+    };
+    for (const name of ['pushState', 'replaceState']) {
+      const orig = history[name];
+      if (typeof orig !== 'function') continue;
+      const wrapped = function () {
+        const out = orig.apply(this, arguments);
+        try { check(); } catch (e) {}
+        return out;
+      };
+      try { wrapped.toString = () => orig.toString(); } catch (e) {}
+      history[name] = wrapped;
+    }
+    window.addEventListener('popstate', () => { try { check(); } catch (e) {} });
+    window.addEventListener('hashchange', () => { try { check(); } catch (e) {} });
   }
 
   // Idle heartbeats stop after a few, so a paused player does not keep the extension's service
